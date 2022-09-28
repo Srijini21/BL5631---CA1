@@ -1,0 +1,93 @@
+##querying GSE57017 processed data
+library(GEOquery)
+gse57017<-getGEO('GSE57017')
+gse57017es<-gse57017[[1]]
+
+##reading raw data files
+library(oligo)
+library(oligoClasses)
+gse57017_celfiles<-list.celfiles(full.names=TRUE,listGzipped = TRUE)
+gse57017_celdata<-read.celfiles(gse57017_celfiles)
+
+##working with the metadata
+library(tidyverse)
+varLabels(gse57017es)
+gse57017es$supplementary_file
+pd<-pData(gse57017es)
+pd['cel_file'] <- str_split(pd$supplementary_file,"/") %>% map_chr(tail,1)
+gse57017_celdata <- read.celfiles(pd$cel_file,phenoData=phenoData(gse57017es))
+
+## Variable selection
+#The sample accessions are in "geo_accession" and the variables of interest are in "source_name_ch1" and "treatment:ch1")
+pData(gse57017_celdata)[,c("geo_accession","genotype/variation:ch1","treatment:ch1")]
+
+## Background correction, Normalization and Summarization using RMA
+gse57017_eset<-rma(gse57017_celdata)
+
+## Specifying a model for analysing differentially expressed genes
+library(dplyr)
+pd57017e_set<-pData(gse57017_eset)
+pd57017exp_set<-rename(pd57017e_set,genotype="genotype/variation:ch1",treatment="treatment:ch1")
+
+pd57017exp_set$treatment <- as.factor(pd57017exp_set$treatment)
+levels(pd57017exp_set$treatment) <- c("none","IFN","TNF")
+pd57017exp_set$group <- as.factor(paste(pd57017exp_set$genotype,pd57017exp_set$treatment))
+levels(pd57017exp_set$group) <- c("S7.IFN","S7.none","S7.TNF","WT.IFN","WT.none","WT.TNF")
+
+##Designing model matrix
+design <- model.matrix(~ 0 + pd57017exp_set$group)
+colnames(design) <- levels(pd57017exp_set$group)
+design
+
+##Creating Contrasts matrix
+library(limma)
+contrasts_matrix <- makeContrasts(WT_IFN=WT.IFN-WT.none,
+                                  WT_TNF=WT.TNF-WT.none,
+                                  S7_IFN=S7.IFN-S7.none,
+                                  S7_TNF=S7.TNF-S7.none,
+                                  cells_none=WT.none-S7.none,
+                                  cells_IFN=WT.IFN-S7.IFN,
+                                  cells_TNF=WT.TNF-S7.TNF,
+                                  interactions_IFN=(WT.IFN-S7.IFN)-(WT.none-S7.none),
+                                  interactions_TNF=(WT.TNF-S7.TNF)-(WT.none-S7.none),
+                                  levels=design)
+library(kableExtra)
+kable(contrasts_matrix)
+contrasts_matrix
+
+##Fitting linear regression model for microarray data
+gse57017_fit <- lmFit(gse57017_eset,design)
+gse57017_fit2 <- contrasts.fit(gse57017_fit,contrasts=contrasts_matrix)
+gse57017_fit2 <- eBayes(gse57017_fit2)
+summary(decideTests(gse57017_fit2,lfc=1))
+
+ps <- rownames(topTable(gse57017_fit2))
+ps2 <- topTable(gse57017_fit2,p.value = 0.05,lfc=1)
+ps_up <- rownames(ps2[ps2$logFC > 0,])
+
+#AnnotationDbi Interface
+library(hugene20sttranscriptcluster.db)
+columns(hugene20sttranscriptcluster.db)
+keytypes(hugene20sttranscriptcluster.db)
+
+head(keys(hugene20sttranscriptcluster.db,keytype="PROBEID"))
+AnnotationDbi::select(hugene20sttranscriptcluster.db,ps,c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+
+##Plots
+#Volcano Plot
+volcanoplot(gse57017_fit2,coef=2)
+interesting_genes <- topTable(gse57017_fit2,number=Inf,p.value = 0.05,lfc=2)
+volcanoplot(gse57017_fit2, coef=2, main=sprintf("%d features pass our cutoffs",nrow(interesting_genes)))
+
+#Heatmaps
+interest_genes_gse57017 <- gse57017_eset[rownames(interesting_genes)]
+
+heatmap(exprs(interest_genes_gse57017))
+library(pheatmap)
+pheatmap(interest_genes_gse57017)
+
+library(RColorBrewer)
+heatmap(exprs(interest_genes_gse57017),
+        labCol=gse57017_eset[['treatment']] ,labRow=NA,
+        col       = rev(brewer.pal(10, "RdBu")),
+        distfun   = function(x) as.dist(1-cor(t(x))))
